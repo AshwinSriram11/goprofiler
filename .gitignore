@@ -1,0 +1,23 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Go build/test artifacts
+*.test
+*.out
+
+# pprof profile dumps
+*.pprof
+*.prof
+cpu.prof
+mem.prof
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
