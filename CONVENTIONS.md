@@ -29,6 +29,28 @@ Examples:
 - `feat: add flags for pprof server address`
 - `docs: add branching/commit conventions`
 
+## Pull Requests
+
+Title mirrors the commit type prefix, kept under ~70 characters:
+
+```
+<type>: <short summary>
+```
+
+Description:
+
+```
+## Summary
+<1-3 bullet points — what changed, and why, at a higher level than the commits>
+
+## Test plan
+<bulleted checklist of how this was verified>
+```
+
+Examples:
+- `feat: pull-based collector (Phase 1)`
+- `docs: push vs pull architecture notes`
+
 ## Workflow
 
 1. Branch off `main` for the change.
