@@ -1,0 +1,5 @@
+[
+  { "name": "workload-a", "url": "http://localhost:6061" },
+  { "name": "workload-b", "url": "http://localhost:6062" },
+  { "name": "workload-c", "url": "http://localhost:6063" }
+]

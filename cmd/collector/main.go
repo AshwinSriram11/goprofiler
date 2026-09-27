@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -11,42 +12,80 @@ import (
 	"time"
 )
 
+// Target identifies one service to pull a profile from, as read from a
+// targets config file (see targets.json).
+type Target struct {
+	Name string `json:"name"`
+	URL  string `json:"url"`
+}
+
+// loadTargets reads a targets config file (see targets.json) and returns the
+// list of services to collect from.
+func loadTargets(path string) ([]Target, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading %s: %w", path, err)
+	}
+
+	var targets []Target
+	if err := json.Unmarshal(data, &targets); err != nil {
+		return nil, fmt.Errorf("parsing %s: %w", path, err)
+	}
+
+	if len(targets) == 0 {
+		return nil, fmt.Errorf("%s: no targets defined", path)
+	}
+
+	return targets, nil
+}
+
 func main() {
-	target := flag.String("target", "http://localhost:6061", "base URL of the service to profile")
-	service := flag.String("service", "workload", "label identifying the profiled service, used in output filenames")
+	configPath := flag.String("config", "targets.json", "path to a JSON file listing targets to collect from")
 	seconds := flag.Int("seconds", 10, "duration in seconds to sample the CPU profile for")
 	outDir := flag.String("out", "./profiles", "directory to write profile files to")
 	interval := flag.Duration("interval", 0, "if set, repeatedly collect a profile on this interval instead of once")
 	flag.Parse()
+
+	targets, err := loadTargets(*configPath)
+	if err != nil {
+		log.Fatalf("collector: %v", err)
+	}
 
 	if err := os.MkdirAll(*outDir, 0o755); err != nil {
 		log.Fatalf("collector: creating output dir: %v", err)
 	}
 
 	if *interval <= 0 {
-		if err := collectOnce(*target, *service, *seconds, *outDir); err != nil {
-			log.Fatalf("collector: %v", err)
-		}
+		collectAll(targets, *seconds, *outDir)
 		return
 	}
 
 	ticker := time.NewTicker(*interval)
 	defer ticker.Stop()
 	for {
-		if err := collectOnce(*target, *service, *seconds, *outDir); err != nil {
-			log.Printf("collector: %v", err)
-		}
+		collectAll(targets, *seconds, *outDir)
 		<-ticker.C
 	}
 }
 
-func collectOnce(target, service string, seconds int, outDir string) error {
-	data, err := fetchCPUProfile(target, seconds)
+// collectAll pulls a profile from every target, logging rather than
+// aborting on an individual target's failure so one down service doesn't
+// stop collection from the rest.
+func collectAll(targets []Target, seconds int, outDir string) {
+	for _, t := range targets {
+		if err := collectOnce(t, seconds, outDir); err != nil {
+			log.Printf("collector: %s: %v", t.Name, err)
+		}
+	}
+}
+
+func collectOnce(target Target, seconds int, outDir string) error {
+	data, err := fetchCPUProfile(target.URL, seconds)
 	if err != nil {
-		return fmt.Errorf("Error fetching profile: %w", err)
+		return fmt.Errorf("fetching profile: %w", err)
 	}
 
-	path := filepath.Join(outDir, fmt.Sprintf("%s-%d-cpu.pb.gz", service, time.Now().Unix()))
+	path := filepath.Join(outDir, fmt.Sprintf("%s-%d-cpu.pb.gz", target.Name, time.Now().Unix()))
 	if err := os.WriteFile(path, data, 0o644); err != nil {
 		return fmt.Errorf("writing %s: %w", path, err)
 	}
