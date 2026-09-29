@@ -14,6 +14,8 @@ func main() {
 	flag.Parse()
 
 	go burnCPU()
+	go steadyChurn()
+	go genuineLeak()
 
 	log.Printf("workload: serving pprof on %s", *addr)
 	log.Fatal(http.ListenAndServe(*addr, nil))
@@ -27,6 +29,31 @@ func burnCPU() {
 			isPrime(largeRandomOdd())
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// steadyChurn repeatedly allocates and discards short-lived buffers, so a
+// heap profile shows steady allocation traffic without any growth in
+// in-use memory — the baseline "healthy" pattern to contrast against
+// genuineLeak.
+func steadyChurn() {
+	for {
+		buf := make([]byte, 64*1024)
+		for i := range buf {
+			buf[i] = byte(i)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// genuineLeak accumulates buffers in a slice that's never drained, so a
+// heap profile taken over time shows in-use memory growing without
+// bound — the failure case steadyChurn is meant to contrast against.
+func genuineLeak() {
+	var leaked [][]byte
+	for {
+		leaked = append(leaked, make([]byte, 64*1024))
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 
