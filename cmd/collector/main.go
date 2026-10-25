@@ -31,8 +31,9 @@ type profileKind struct {
 }
 
 var knownProfiles = map[string]profileKind{
-	"cpu":  {name: "cpu", path: "/debug/pprof/profile", needsDuration: true},
-	"heap": {name: "heap", path: "/debug/pprof/heap", needsDuration: false},
+	"cpu":       {name: "cpu", path: "/debug/pprof/profile", needsDuration: true},
+	"heap":      {name: "heap", path: "/debug/pprof/heap", needsDuration: false},
+	"goroutine": {name: "goroutine", path: "/debug/pprof/goroutine", needsDuration: false},
 }
 
 // parseProfiles turns a comma-separated flag value like "cpu,heap" into the
@@ -44,7 +45,7 @@ func parseProfiles(csv string) ([]profileKind, error) {
 		n = strings.TrimSpace(n)
 		kind, ok := knownProfiles[n]
 		if !ok {
-			return nil, fmt.Errorf("unknown profile type %q (known: cpu, heap)", n)
+			return nil, fmt.Errorf("unknown profile type %q (known: cpu, heap, goroutine)", n)
 		}
 		kinds = append(kinds, kind)
 	}
@@ -73,7 +74,7 @@ func loadTargets(path string) ([]Target, error) {
 
 func main() {
 	configPath := flag.String("config", "targets.json", "path to a JSON file listing targets to collect from")
-	profilesFlag := flag.String("profiles", "cpu", "comma-separated list of profile types to collect (cpu, heap)")
+	profilesFlag := flag.String("profiles", "cpu", "comma-separated list of profile types to collect (cpu, heap, goroutine)")
 	seconds := flag.Int("seconds", 10, "duration in seconds to sample the CPU profile for")
 	outDir := flag.String("out", "./profiles", "directory to write profile files to")
 	interval := flag.Duration("interval", 0, "if set, repeatedly collect a profile on this interval instead of once")
