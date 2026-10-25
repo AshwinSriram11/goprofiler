@@ -16,6 +16,7 @@ func main() {
 	go burnCPU()
 	go steadyChurn()
 	go genuineLeak()
+	go goroutineLeak()
 
 	log.Printf("workload: serving pprof on %s", *addr)
 	log.Fatal(http.ListenAndServe(*addr, nil))
@@ -54,6 +55,20 @@ func genuineLeak() {
 	for {
 		leaked = append(leaked, make([]byte, 64*1024))
 		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// goroutineLeak spawns a goroutine that blocks forever waiting on a channel
+// nobody ever sends to or closes, so a goroutine profile taken over time
+// shows the goroutine count growing without bound — the same "genuine
+// leak" shape as genuineLeak, but for goroutines instead of heap memory.
+func goroutineLeak() {
+	for {
+		block := make(chan struct{})
+		go func() {
+			<-block
+		}()
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 
