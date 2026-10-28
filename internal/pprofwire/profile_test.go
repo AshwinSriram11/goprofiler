@@ -219,6 +219,16 @@ func TestParseGzippedMatchesRaw(t *testing.T) {
 	if !reflect.DeepEqual(a.Strings, b.Strings) || len(a.Samples) != len(b.Samples) || len(a.Locations) != len(b.Locations) {
 		t.Error("gzipped and raw decodes disagree")
 	}
+
+	// RawSize is the decoded size even when the input was gzipped, and the
+	// per-field byte counts add up to it.
+	sum := 0
+	for _, n := range a.FieldBytes {
+		sum += n
+	}
+	if a.RawSize != len(raw) || sum != len(raw) {
+		t.Errorf("RawSize = %d, sum(FieldBytes) = %d, want both %d", a.RawSize, sum, len(raw))
+	}
 }
 
 func TestValidate(t *testing.T) {

@@ -99,6 +99,13 @@ type Profile struct {
 	Comments          []int64 // string-table indexes
 	DefaultSampleType int64   // string-table index
 
+	// RawSize is the decoded (uncompressed) size in bytes. FieldBytes maps a
+	// top-level field number (e.g. 6 = string_table) to the total wire bytes
+	// all its occurrences took, key and length prefix included, so the values
+	// add up to RawSize. Both are only set by Decode.
+	RawSize    int
+	FieldBytes map[int]int
+
 	locByID  map[uint64]*Location
 	funcByID map[uint64]*Function
 	mapByID  map[uint64]*Mapping
@@ -135,8 +142,9 @@ func Parse(data []byte) (*Profile, error) {
 // any order (Go writes the string table last), so nothing is resolved until
 // every table has been read. Unknown fields are skipped.
 func Decode(raw []byte) (*Profile, error) {
-	p := &Profile{}
+	p := &Profile{RawSize: len(raw), FieldBytes: make(map[int]int)}
 	err := eachField(raw, func(f field) error {
+		p.FieldBytes[f.num] += f.size
 		switch f.num {
 		case 1, 2, 3, 4, 5, 11:
 			b, err := f.bytes()

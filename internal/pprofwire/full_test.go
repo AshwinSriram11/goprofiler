@@ -146,6 +146,25 @@ func TestDecodeFullProfile(t *testing.T) {
 	if err := p.Validate(); err != nil {
 		t.Errorf("Validate: %v", err)
 	}
+
+	// Every wire byte, including the skipped unknown fields, is attributed to
+	// exactly one top-level field, and each count includes key and length.
+	sum := 0
+	for _, n := range p.FieldBytes {
+		sum += n
+	}
+	if p.RawSize != len(raw) || sum != len(raw) {
+		t.Errorf("RawSize = %d, sum(FieldBytes) = %d, want both %d", p.RawSize, sum, len(raw))
+	}
+	if got := p.FieldBytes[6]; got != len(stringTable) {
+		t.Errorf("FieldBytes[6] = %d, want %d (the whole string table)", got, len(stringTable))
+	}
+	if got, want := p.FieldBytes[4], len(fBytes(4, location))+len(fBytes(4, location2)); got != want {
+		t.Errorf("FieldBytes[4] = %d, want %d (two locations)", got, want)
+	}
+	if got, want := p.FieldBytes[98], len(fFixed32(98, 0xdeadbeef)); got != want {
+		t.Errorf("FieldBytes[98] = %d, want %d (unknown fixed32 field)", got, want)
+	}
 }
 
 func TestLookups(t *testing.T) {

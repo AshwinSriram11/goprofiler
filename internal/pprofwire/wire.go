@@ -24,6 +24,7 @@ type field struct {
 	wire int
 	v    uint64 // varint or fixed value
 	data []byte // payload for wireBytes
+	size int    // bytes the whole field took on the wire: key, length prefix and payload
 }
 
 // bytes returns the payload of a length-delimited field, for fields that
@@ -66,6 +67,7 @@ func setBool(dst *bool, f field) error {
 // callers can simply ignore field numbers they don't recognise.
 func eachField(b []byte, fn func(field) error) error {
 	for len(b) > 0 {
+		start := len(b)
 		key, n := binary.Uvarint(b)
 		if n <= 0 {
 			return errTruncated
@@ -100,6 +102,7 @@ func eachField(b []byte, fn func(field) error) error {
 			return fmt.Errorf("field %d: unsupported wire type %d", f.num, f.wire)
 		}
 
+		f.size = start - len(b)
 		if err := fn(f); err != nil {
 			return err
 		}
