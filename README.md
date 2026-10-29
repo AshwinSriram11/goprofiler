@@ -82,6 +82,7 @@ go run ./cmd/inspect profiles/<file>.pb.gz
 | Flag | Default | Meaning |
 |---|---|---|
 | `-top` | `3` | Number of heaviest stacks to print |
+| `-column` | profile default, else last | Value column that ranks the stacks: an index or a type such as `inuse_space` |
 | `-json` | off | Print the full report as JSON instead of the text summary |
 
 The decoder reads the protobuf bytes directly instead of using

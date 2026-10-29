@@ -52,13 +52,14 @@ func TestWriteSummary(t *testing.T) {
 	p, r := analyze(t, data)
 
 	var out bytes.Buffer
-	writeSummary(&out, "test.pb.gz", p, r, 3)
+	writeSummary(&out, "test.pb.gz", p, r, 3, r.Overview.DefaultColumn)
 	got := out.String()
 
 	for _, want := range []string{
 		"profile      test.pb.gz",
-		"type         goroutine/count",
 		"validation   ok",
+		"columns (* ranks the stacks below)",
+		"* goroutine/count",
 		"where the bytes go",
 		"string_table",
 		"top 3 stacks by goroutine/count",
@@ -85,7 +86,7 @@ func TestWriteSummaryTopZeroOmitsStacks(t *testing.T) {
 	p, r := analyze(t, leakedGoroutineProfile(t, 3))
 
 	var out bytes.Buffer
-	writeSummary(&out, "x", p, r, 0)
+	writeSummary(&out, "x", p, r, 0, r.Overview.DefaultColumn)
 	if strings.Contains(out.String(), "top ") {
 		t.Errorf("-top 0 should print no stacks:\n%s", out.String())
 	}
@@ -102,12 +103,81 @@ func TestWriteSummaryShowsUnresolvedLocations(t *testing.T) {
 	r := inspect.Analyze(p, 0)
 
 	var out bytes.Buffer
-	writeSummary(&out, "x", p, r, len(r.Samples))
+	writeSummary(&out, "x", p, r, len(r.Samples), r.Overview.DefaultColumn)
 	if !strings.Contains(out.String(), "(unresolved)") {
 		t.Errorf("a location with no lines should print as unresolved:\n%s", out.String())
 	}
 	if r.Sharing.UnresolvedLocations != 1 {
 		t.Errorf("UnresolvedLocations = %d, want 1", r.Sharing.UnresolvedLocations)
+	}
+}
+
+func TestWriteSummaryShowsDuration(t *testing.T) {
+	p, _ := analyze(t, leakedGoroutineProfile(t, 3))
+	p.DurationNanos = 10_000_000_000
+	r := inspect.Analyze(p, 0)
+
+	var out bytes.Buffer
+	writeSummary(&out, "x", p, r, 1, r.Overview.DefaultColumn)
+	if !strings.Contains(out.String(), "duration     10s") {
+		t.Errorf("summary should show the 10s duration:\n%s", out.String())
+	}
+
+	// A snapshot profile has no duration, so there is no line for it.
+	p.DurationNanos = 0
+	out.Reset()
+	writeSummary(&out, "x", p, inspect.Analyze(p, 0), 1, 0)
+	if strings.Contains(out.String(), "duration") {
+		t.Errorf("a zero duration should not be printed:\n%s", out.String())
+	}
+}
+
+func TestAggregationNote(t *testing.T) {
+	if got := aggregationNote(nil, 8); got != "" {
+		t.Errorf("a column with no aggregation should add nothing, got %q", got)
+	}
+
+	exact := aggregationNote(&inspect.Aggregation{Events: 149, Factor: 18.625, FlatSlots: 609}, 8)
+	if !strings.Contains(exact, "18.6x over 8 stacks, 609 flat slots") || strings.Contains(exact, "~") || strings.Contains(exact, "estimate") {
+		t.Errorf("exact note = %q", exact)
+	}
+
+	est := aggregationNote(&inspect.Aggregation{Events: 44414, Factor: 5551.75, FlatSlots: 341984, Estimated: true}, 8)
+	if !strings.Contains(est, "~5551.8x over 8 stacks, ~341984 flat slots") || !strings.Contains(est, "estimate") {
+		t.Errorf("heap counts must be marked as estimates, got %q", est)
+	}
+}
+
+func TestSelectColumn(t *testing.T) {
+	cols := []inspect.Column{
+		{Type: "alloc_space", Unit: "bytes"},
+		{Type: "inuse_space", Unit: "bytes"},
+	}
+	tests := []struct {
+		spec    string
+		def     int
+		want    int
+		wantErr string
+	}{
+		{spec: "", def: 1, want: 1},
+		{spec: "0", def: 1, want: 0},
+		{spec: "alloc_space", def: 1, want: 0},
+		{spec: "inuse_space/bytes", def: 0, want: 1},
+		{spec: "2", wantErr: "out of range"},
+		{spec: "-1", wantErr: "out of range"},
+		{spec: "cpu", wantErr: "available: alloc_space, inuse_space"},
+	}
+	for _, tt := range tests {
+		got, err := selectColumn(cols, tt.spec, tt.def)
+		if tt.wantErr != "" {
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("selectColumn(%q) error = %v, want one containing %q", tt.spec, err, tt.wantErr)
+			}
+			continue
+		}
+		if err != nil || got != tt.want {
+			t.Errorf("selectColumn(%q, def %d) = %d, %v, want %d", tt.spec, tt.def, got, err, tt.want)
+		}
 	}
 }
 
