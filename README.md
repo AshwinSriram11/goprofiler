@@ -14,7 +14,11 @@ cmd/
   leaky-slice/    # unbounded slice growth + goroutine block, pprof over HTTP
   workload/       # service to profile: CPU burn, heap churn/leak, goroutine leak
   collector/      # pulls pprof profiles from one or more targets and saves them
+  inspect/        # decodes a saved profile and prints its structure and sharing stats
 targets.json      # list of targets the collector pulls from
+internal/
+  pprofwire/      # hand-written decoder for pprof's profile.proto wire format
+  inspect/        # turns a decoded profile into a report of tables and statistics
 ```
 
 ## Workload
@@ -62,6 +66,27 @@ Inspect one with:
 ```sh
 go tool pprof -http=:8081 profiles/<file>.pb.gz
 ```
+
+## Inspector
+
+`cmd/inspect` opens a saved profile (`.pb.gz` or already-decoded `.pb`) and
+shows what is inside it: table sizes, stack depth, how much is shared
+(aggregation of identical stacks, reuse of frames), where the bytes go, the
+mappings and their symbolization flags, and the heaviest stacks with frames
+resolved.
+
+```sh
+go run ./cmd/inspect profiles/<file>.pb.gz
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `-top` | `3` | Number of heaviest stacks to print |
+| `-json` | off | Print the full report as JSON instead of the text summary |
+
+The decoder reads the protobuf bytes directly instead of using
+`github.com/google/pprof/profile`, so string indexes and IDs stay visible
+rather than being resolved on load.
 
 ## Running a single experiment
 
