@@ -9,6 +9,9 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
+	"strings"
+	"time"
 
 	"github.com/AshwinSriram11/goprofiler/internal/inspect"
 	"github.com/AshwinSriram11/goprofiler/internal/pprofwire"
@@ -17,10 +20,11 @@ import (
 func main() {
 	asJSON := flag.Bool("json", false, "print the full report as JSON instead of a text summary")
 	top := flag.Int("top", 3, "number of heaviest stacks to print in the text summary")
+	column := flag.String("column", "", "value column that ranks the stacks: an index or a type such as inuse_space (default: the profile's own, else the last, as go tool pprof)")
 	flag.Parse()
 
 	if flag.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "usage: inspect [-json] [-top N] <profile.pb.gz>")
+		fmt.Fprintln(os.Stderr, "usage: inspect [-json] [-top N] [-column NAME] <profile.pb.gz>")
 		os.Exit(2)
 	}
 	path := flag.Arg(0)
@@ -34,6 +38,10 @@ func main() {
 		log.Fatalf("inspect: %s: %v", path, err)
 	}
 	report := inspect.Analyze(p, len(data))
+	col, err := selectColumn(report.Columns, *column, report.Overview.DefaultColumn)
+	if err != nil {
+		log.Fatalf("inspect: %v", err)
+	}
 
 	if *asJSON {
 		if err := writeJSON(os.Stdout, report); err != nil {
@@ -41,7 +49,7 @@ func main() {
 		}
 		return
 	}
-	writeSummary(os.Stdout, path, p, report, *top)
+	writeSummary(os.Stdout, path, p, report, *top, col)
 }
 
 func writeJSON(w io.Writer, r *inspect.Report) error {
@@ -52,7 +60,8 @@ func writeJSON(w io.Writer, r *inspect.Report) error {
 
 // writeSummary prints the report as text, then the heaviest stacks with their
 // frames resolved through the profile's location -> function -> string tables.
-func writeSummary(w io.Writer, path string, p *pprofwire.Profile, r *inspect.Report, top int) {
+// col is the value column that ranks the stacks.
+func writeSummary(w io.Writer, path string, p *pprofwire.Profile, r *inspect.Report, top, col int) {
 	o, s := r.Overview, r.Sharing
 	row := func(label, format string, args ...any) {
 		fmt.Fprintf(w, "%-12s %s\n", label, fmt.Sprintf(format, args...))
@@ -63,11 +72,8 @@ func writeSummary(w io.Writer, path string, p *pprofwire.Profile, r *inspect.Rep
 	if o.Time != "" {
 		row("time", "%s", o.Time)
 	}
-	colLabel := "none"
-	if o.DefaultColumn < len(r.Columns) {
-		c := r.Columns[o.DefaultColumn]
-		colLabel = c.Type + "/" + c.Unit
-		row("type", "%s (default of %d columns)", colLabel, len(r.Columns))
+	if o.DurationNanos > 0 {
+		row("duration", "%s", time.Duration(o.DurationNanos))
 	}
 	if o.Validation == "" {
 		row("validation", "ok")
@@ -80,13 +86,18 @@ func writeSummary(w io.Writer, path string, p *pprofwire.Profile, r *inspect.Rep
 		len(r.Strings), len(r.Functions), len(r.Locations), len(r.Mappings), len(r.Samples))
 	row("stacks", "%d unique, depth avg %.1f, max %d", s.Samples, s.AvgDepth, s.MaxDepth)
 	row("sharing", "%d stack slots over %d unique locations (%.2fx reuse)", s.Slots, s.UniqueLocations, s.FrameSharing)
-	if a := s.Aggregation; a != nil {
-		row("aggregation", "%d %s across %d stacks (%.1fx); %d slots if every event kept its own copy",
-			a.Events, colLabel, s.Samples, a.Factor, a.FlatSlots)
-	} else {
-		row("aggregation", "not applicable: %s is not a count", colLabel)
-	}
 	row("unresolved", "%d locations without a function", s.UnresolvedLocations)
+
+	if len(r.Columns) > 0 {
+		fmt.Fprintln(w, "\ncolumns (* ranks the stacks below)")
+		for i, c := range r.Columns {
+			mark := " "
+			if i == col {
+				mark = "*"
+			}
+			fmt.Fprintf(w, "  %s %-24s %12d%s\n", mark, c.Type+"/"+c.Unit, c.Total, aggregationNote(c.Aggregation, s.Samples))
+		}
+	}
 
 	fmt.Fprintln(w, "\nwhere the bytes go")
 	for _, b := range r.Bytes {
@@ -107,13 +118,16 @@ func writeSummary(w io.Writer, path string, p *pprofwire.Profile, r *inspect.Rep
 	if top <= 0 || len(r.Samples) == 0 {
 		return
 	}
-	def := o.DefaultColumn
+	colLabel := "none"
+	if col < len(r.Columns) {
+		colLabel = r.Columns[col].Type + "/" + r.Columns[col].Unit
+	}
 	order := make([]int, len(r.Samples))
 	for i := range order {
 		order[i] = i
 	}
 	sort.SliceStable(order, func(a, b int) bool {
-		return sampleValue(r.Samples[order[a]], def) > sampleValue(r.Samples[order[b]], def)
+		return sampleValue(r.Samples[order[a]], col) > sampleValue(r.Samples[order[b]], col)
 	})
 	if top > len(order) {
 		top = len(order)
@@ -121,9 +135,46 @@ func writeSummary(w io.Writer, path string, p *pprofwire.Profile, r *inspect.Rep
 	fmt.Fprintf(w, "\ntop %d stacks by %s\n", top, colLabel)
 	for rank, i := range order[:top] {
 		smp := r.Samples[i]
-		fmt.Fprintf(w, "  #%d  %d\n", rank+1, sampleValue(smp, def))
+		fmt.Fprintf(w, "  #%d  %d\n", rank+1, sampleValue(smp, col))
 		writeStack(w, p, smp.LocationIDs)
 	}
+}
+
+// aggregationNote describes how much a count column collapses into unique
+// stacks. Heap columns are marked as estimates, since the heap profiler
+// samples allocations and scales the counts up.
+func aggregationNote(a *inspect.Aggregation, stacks int) string {
+	if a == nil {
+		return ""
+	}
+	approx, caveat := "", ""
+	if a.Estimated {
+		approx = "~"
+		caveat = " (estimate: heap counts are scaled up from sampling)"
+	}
+	return fmt.Sprintf("  %s%.1fx over %d stacks, %s%d flat slots%s", approx, a.Factor, stacks, approx, a.FlatSlots, caveat)
+}
+
+// selectColumn resolves the -column flag: empty means def, otherwise an index
+// or a column type (inuse_space) or type/unit (inuse_space/bytes).
+func selectColumn(cols []inspect.Column, spec string, def int) (int, error) {
+	if spec == "" {
+		return def, nil
+	}
+	if i, err := strconv.Atoi(spec); err == nil {
+		if i < 0 || i >= len(cols) {
+			return 0, fmt.Errorf("column %d out of range: the profile has %d columns", i, len(cols))
+		}
+		return i, nil
+	}
+	names := make([]string, len(cols))
+	for i, c := range cols {
+		if spec == c.Type || spec == c.Type+"/"+c.Unit {
+			return i, nil
+		}
+		names[i] = c.Type
+	}
+	return 0, fmt.Errorf("no column %q; available: %s", spec, strings.Join(names, ", "))
 }
 
 func sampleValue(s inspect.SampleRow, col int) int64 {

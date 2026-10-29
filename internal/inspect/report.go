@@ -6,6 +6,7 @@ package inspect
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/AshwinSriram11/goprofiler/internal/pprofwire"
@@ -43,10 +44,13 @@ type Overview struct {
 }
 
 // Column is one value column of the samples (one per sample type).
+// Aggregation is only set for columns that count things (unit "count"); for
+// bytes or nanoseconds, "events per stack" means nothing.
 type Column struct {
-	Type  string `json:"type"`
-	Unit  string `json:"unit"`
-	Total int64  `json:"total"`
+	Type        string       `json:"type"`
+	Unit        string       `json:"unit"`
+	Total       int64        `json:"total"`
+	Aggregation *Aggregation `json:"aggregation"`
 }
 
 // Sharing summarises how much structure the profile reuses.
@@ -59,18 +63,17 @@ type Sharing struct {
 	AvgDepth            float64 `json:"avgDepth"`
 	UnresolvedLocations int     `json:"unresolvedLocations"` // locations with no function lines
 
-	// Aggregation is only set when the default column counts things (unit
-	// "count"); for bytes or nanoseconds, "events per stack" means nothing.
-	Aggregation *Aggregation `json:"aggregation"`
 }
 
-// Aggregation compares what the default column counts with how many unique
-// stacks hold it. Heap counts are scaled estimates, so Events is "sum of
-// values", not a literal event count.
+// Aggregation compares what a count column counts with how many unique stacks
+// hold it. Estimated is set for Go heap columns (alloc_*, inuse_*): the heap
+// profiler samples about one allocation per 512 KB and scales the counts up,
+// so Events is "sum of values", not a literal event count.
 type Aggregation struct {
-	Events    int64   `json:"events"`    // sum of the default column
+	Events    int64   `json:"events"`    // sum of the column
 	Factor    float64 `json:"factor"`    // Events / unique stacks
 	FlatSlots int64   `json:"flatSlots"` // stack positions if every event kept its own copy of its stack
+	Estimated bool    `json:"estimated"`
 }
 
 // ByteShare is the share of the decoded file taken by one top-level field.
@@ -151,7 +154,7 @@ func Analyze(p *pprofwire.Profile, gzipSize int) *Report {
 	r := &Report{
 		Overview: overview(p, gzipSize, def),
 		Columns:  cols,
-		Sharing:  sharing(p, cols, def),
+		Sharing:  sharing(p),
 		Bytes:    byteShares(p),
 	}
 
@@ -221,8 +224,9 @@ func Analyze(p *pprofwire.Profile, gzipSize int) *Report {
 	return r
 }
 
-// defaultColumn is the column used for ranking and aggregation: the profile's
-// default sample type if it names one, otherwise the first.
+// defaultColumn is the column used to rank stacks: the profile's default
+// sample type if it names one, otherwise the last, as go tool pprof does. That
+// makes inuse_space the default for heap profiles and cpu time for CPU ones.
 func defaultColumn(p *pprofwire.Profile) int {
 	if p.DefaultSampleType != 0 {
 		for i, st := range p.SampleTypes {
@@ -230,6 +234,9 @@ func defaultColumn(p *pprofwire.Profile) int {
 				return i
 			}
 		}
+	}
+	if n := len(p.SampleTypes); n > 0 {
+		return n - 1
 	}
 	return 0
 }
@@ -300,11 +307,28 @@ func columns(p *pprofwire.Profile) []Column {
 		for _, s := range p.Samples {
 			cols[i].Total += value(s, i)
 		}
+		if cols[i].Unit == "count" {
+			cols[i].Aggregation = aggregation(p, i, cols[i])
+		}
 	}
 	return cols
 }
 
-func sharing(p *pprofwire.Profile, cols []Column, def int) Sharing {
+func aggregation(p *pprofwire.Profile, col int, c Column) *Aggregation {
+	a := &Aggregation{
+		Events:    c.Total,
+		Estimated: strings.HasPrefix(c.Type, "alloc_") || strings.HasPrefix(c.Type, "inuse_"),
+	}
+	for _, s := range p.Samples {
+		a.FlatSlots += value(s, col) * int64(len(s.LocationIDs))
+	}
+	if len(p.Samples) > 0 {
+		a.Factor = float64(a.Events) / float64(len(p.Samples))
+	}
+	return a
+}
+
+func sharing(p *pprofwire.Profile) Sharing {
 	s := Sharing{Samples: len(p.Samples)}
 	seen := make(map[uint64]bool)
 	for _, smp := range p.Samples {
@@ -328,17 +352,6 @@ func sharing(p *pprofwire.Profile, cols []Column, def int) Sharing {
 		if len(l.Lines) == 0 {
 			s.UnresolvedLocations++
 		}
-	}
-
-	if def < len(cols) && cols[def].Unit == "count" {
-		a := &Aggregation{Events: cols[def].Total}
-		for _, smp := range p.Samples {
-			a.FlatSlots += value(smp, def) * int64(len(smp.LocationIDs))
-		}
-		if s.Samples > 0 {
-			a.Factor = float64(a.Events) / float64(s.Samples)
-		}
-		s.Aggregation = a
 	}
 	return s
 }

@@ -71,8 +71,13 @@ func TestAnalyzeToyProfile(t *testing.T) {
 		t.Errorf("Time = %q, want the UTC RFC 3339 form", o.Time)
 	}
 
-	if want := []Column{{Type: "goroutine", Unit: "count", Total: 3}}; !reflect.DeepEqual(r.Columns, want) {
-		t.Errorf("Columns = %+v, want %+v", r.Columns, want)
+	// 3 goroutines in 2 stacks; flat, A would take 2*4 slots and B 1*3.
+	wantCols := []Column{{
+		Type: "goroutine", Unit: "count", Total: 3,
+		Aggregation: &Aggregation{Events: 3, Factor: 1.5, FlatSlots: 11},
+	}}
+	if !reflect.DeepEqual(r.Columns, wantCols) {
+		t.Errorf("Columns = %+v, aggregation %+v, want %+v / %+v", r.Columns, r.Columns[0].Aggregation, wantCols, wantCols[0].Aggregation)
 	}
 
 	s := r.Sharing
@@ -81,10 +86,6 @@ func TestAnalyzeToyProfile(t *testing.T) {
 	}
 	if !approx(s.FrameSharing, 7.0/6.0) || !approx(s.AvgDepth, 3.5) {
 		t.Errorf("FrameSharing = %v, AvgDepth = %v, want 7/6 and 3.5", s.FrameSharing, s.AvgDepth)
-	}
-	// 3 goroutines in 2 stacks; flat, A would take 2*4 slots and B 1*3.
-	if a := s.Aggregation; a == nil || a.Events != 3 || !approx(a.Factor, 1.5) || a.FlatSlots != 11 {
-		t.Errorf("Aggregation = %+v, want events 3, factor 1.5, flat slots 11", a)
 	}
 
 	wantBytes := []ByteShare{
@@ -176,14 +177,87 @@ func TestAnalyzeMultiColumnHasNoAggregation(t *testing.T) {
 	if r.Overview.DefaultColumn != 1 {
 		t.Errorf("DefaultColumn = %d, want 1 (inuse_space)", r.Overview.DefaultColumn)
 	}
-	if r.Sharing.Aggregation != nil {
-		t.Errorf("Aggregation = %+v, want nil for a bytes column", r.Sharing.Aggregation)
+	for i, c := range r.Columns {
+		if c.Aggregation != nil {
+			t.Errorf("column %d (%s/%s) Aggregation = %+v, want nil for a bytes column", i, c.Type, c.Unit, c.Aggregation)
+		}
 	}
 	if r.Columns[0].Total != 110 || r.Columns[1].Total != 45 {
 		t.Errorf("Columns = %+v", r.Columns)
 	}
 	if l := r.Locations[0]; l.UsedBy != 2 || !reflect.DeepEqual(l.Weighted, []int64{110, 45}) {
 		t.Errorf("location: UsedBy = %d, Weighted = %v, want 2 and [110 45]", l.UsedBy, l.Weighted)
+	}
+}
+
+// columnsProfile builds a profile with the given (type, unit) columns and one
+// sample, no locations.
+func columnsProfile(types ...[2]string) *pprofwire.Profile {
+	p := &pprofwire.Profile{Strings: []string{""}}
+	vals := make([]int64, len(types))
+	for i, ty := range types {
+		p.Strings = append(p.Strings, ty[0], ty[1])
+		p.SampleTypes = append(p.SampleTypes, pprofwire.ValueType{
+			Type: int64(len(p.Strings) - 2),
+			Unit: int64(len(p.Strings) - 1),
+		})
+		vals[i] = int64(i + 1)
+	}
+	p.Samples = []pprofwire.Sample{{Values: vals}}
+	return p
+}
+
+func TestAnalyzeDefaultColumnAndEstimates(t *testing.T) {
+	tests := []struct {
+		name      string
+		types     [][2]string
+		wantDef   int
+		wantAgg   []bool // per column: has an Aggregation
+		wantGuess []bool // per column: that Aggregation is Estimated
+	}{
+		{
+			// Like a CPU profile: pprof shows the last column (cpu time).
+			name:      "cpu",
+			types:     [][2]string{{"samples", "count"}, {"cpu", "nanoseconds"}},
+			wantDef:   1,
+			wantAgg:   []bool{true, false},
+			wantGuess: []bool{false, false},
+		},
+		{
+			// Like a heap profile: default is inuse_space, and the count
+			// columns are scaled from sampling, so they are estimates.
+			name:      "heap",
+			types:     [][2]string{{"alloc_objects", "count"}, {"alloc_space", "bytes"}, {"inuse_objects", "count"}, {"inuse_space", "bytes"}},
+			wantDef:   3,
+			wantAgg:   []bool{true, false, true, false},
+			wantGuess: []bool{true, false, true, false},
+		},
+		{
+			name:      "goroutine",
+			types:     [][2]string{{"goroutine", "count"}},
+			wantDef:   0,
+			wantAgg:   []bool{true},
+			wantGuess: []bool{false},
+		},
+		{name: "no sample types", types: nil, wantDef: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := Analyze(columnsProfile(tt.types...), 0)
+			if r.Overview.DefaultColumn != tt.wantDef {
+				t.Errorf("DefaultColumn = %d, want %d", r.Overview.DefaultColumn, tt.wantDef)
+			}
+			for i := range tt.wantAgg {
+				a := r.Columns[i].Aggregation
+				if (a != nil) != tt.wantAgg[i] {
+					t.Errorf("column %d (%s): Aggregation = %+v, want present=%v", i, r.Columns[i].Type, a, tt.wantAgg[i])
+					continue
+				}
+				if a != nil && a.Estimated != tt.wantGuess[i] {
+					t.Errorf("column %d (%s): Estimated = %v, want %v", i, r.Columns[i].Type, a.Estimated, tt.wantGuess[i])
+				}
+			}
+		})
 	}
 }
 
@@ -273,8 +347,8 @@ func TestAnalyzeRealGoroutineProfile(t *testing.T) {
 		t.Errorf("byte shares sum to %d bytes / %.6f%%, want %d / 100%%", bytesSum, pct, r.Overview.RawSize)
 	}
 
-	a := r.Sharing.Aggregation
-	if a == nil || a.Events != r.Columns[0].Total || a.Factor < 1 || a.FlatSlots < int64(r.Sharing.Slots) {
+	a := r.Columns[0].Aggregation
+	if a == nil || a.Events != r.Columns[0].Total || a.Factor < 1 || a.FlatSlots < int64(r.Sharing.Slots) || a.Estimated {
 		t.Errorf("Aggregation = %+v for Slots %d, total %d", a, r.Sharing.Slots, r.Columns[0].Total)
 	}
 
